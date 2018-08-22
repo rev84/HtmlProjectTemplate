@@ -1,4 +1,4 @@
-class Utl
+class window.Utl
   ############################################
   #
   # 数値にカンマを入れる
@@ -422,3 +422,182 @@ class Utl
     catch
       res = null
     res
+
+  ############################################
+  #
+  # ミリ秒待つ（要async/await対応ブラウザ＆coffee2.x）
+  #
+  # @param String key
+  # @return undefined
+  #
+  ############################################
+  @sleep:(msec)->
+    new Promise (resolve, reject) =>
+      setTimeout =>
+        resolve()
+      , msec
+
+  ############################################
+  #
+  # key-valueとしてIndexedDBを簡単に使うクラス
+  #
+  ############################################
+  class @IndexedDB
+    # テーブル名
+    STORE_NAME: 'default'
+    # ロック待ちミリ秒（1回あたり）
+    LOCK_WAIT_MSEC: 50
+    # タイムアウトにするミリ秒
+    TIMEOUT_MSEC: 5000
+
+    constructor:(@dbName = 'default', @dbVersion = 1)->
+      open = window.indexedDB.open(@dbName, @dbVersion)
+      open.onupgradeneeded = (evt)=>
+        res = evt.target.result
+        res.createObjectStore(@STORE_NAME, {keyPath : 'kvstore_key'})
+      open.onsuccess = (evt)=>
+        @db = evt.target.result
+
+    # awaitで使う
+    set:(key, value)->
+      await @waitUnLock()
+      token = @genToken()
+      @lock(token)
+
+      transaction = @db.transaction(@STORE_NAME, 'readwrite')
+      store = transaction.objectStore(@STORE_NAME)
+      request = store.put({kvstore_key: key, kvstore_value: JSON.stringify(value) })
+      request.onsuccess = (evt)=>
+        if token is @token
+          @capture(true, token)
+        else
+          @capture(false, token)
+      request.onerror = (evt)=>
+        @capture(false, token)
+
+      await @waitCapture()
+      if token is @token and @isCaptured
+        @unlock(token)
+      else
+        false
+
+    # awaitで使う
+    get:(key)->
+      await @waitUnLock()
+      token = @genToken()
+      @lock(token)
+
+      transaction = @db.transaction(@STORE_NAME, 'readonly')
+      store = transaction.objectStore(@STORE_NAME)
+      request = store.get(key)
+      request.onsuccess = (evt)=>
+        try
+          res = JSON.parse evt.target.result.kvstore_value
+        catch
+          res = null
+        if token is @token
+          @capture(res, token)
+        else
+          @unlock(token)
+
+      await @waitCapture()
+      if @isCaptured
+        @unlock(token)
+      else
+        null
+
+    # awaitで使う
+    gets:(keys)->
+      await @waitUnLock()
+      token = @genToken()
+      @lock(token)
+
+      res = {}
+      transaction = @db.transaction(@STORE_NAME, 'readonly')
+      store = transaction.objectStore(@STORE_NAME)
+
+      for key in keys
+        request = store.get(key)
+        request.onsuccess = (evt)=>
+          try
+            res[evt.target.result.kvstore_key] = JSON.parse evt.target.result.kvstore_value
+          catch
+            res[evt.target.result.kvstore_key] = null
+      transaction.oncomplete = (evt)=>
+        @capture(res, token)
+
+      await @waitCapture()
+      if @isCaptured
+        @unlock(token)
+      else
+        null
+
+    # awaitで呼ぶ
+    getAllKeys:->
+      await @waitUnLock()
+      token = @genToken()
+      @lock(token)
+
+      keys = []
+      transaction = @db.transaction(@STORE_NAME, 'readonly')
+      store = transaction.objectStore(@STORE_NAME)
+      request = store.openCursor()
+      request.onsuccess = (evt)=>
+        cursor = evt.target.result
+        if cursor
+          keys.push cursor.key
+          cursor.continue()
+        else
+          @capture(keys, token)
+      request.onerror = (evt)=>
+        @unlock(token)
+
+      await @waitCapture()
+      if @isCaptured
+        @unlock(token)
+      else
+        []
+
+    destroy:->
+      window.indexedDB.deleteDatabase(@dbName)
+
+    unlock:(token = null)->
+      if token is null or token is @token
+        res = @result
+        @result = null
+        @isCaptured = false
+        @locked = null
+        @token = null
+        @isLocked = false
+        res
+      else
+        null
+    
+    capture:(value, token)->
+      if @token is token
+        @isLocked = true
+        @isCaptured = true
+        @result = value
+
+    lock:(token)->
+      @isLocked = true
+      @token = token
+      @isCaptured = false
+      @locked = +(new Date())
+      @result = null
+      true
+
+    waitUnLock:->
+      await Utl.sleep(@LOCK_WAIT_MSEC) while @isLocked and +(new Date()) - @locked < @TIMEOUT_MSEC
+      true
+
+    waitCapture:->
+      await Utl.sleep(@LOCK_WAIT_MSEC) while not(@isCaptured) and +(new Date()) - @locked < @TIMEOUT_MSEC
+      true
+
+    waitInitialized:->
+      await Utl.sleep(@LOCK_WAIT_MSEC) while @isInitialized and +(new Date()) - @locked < @TIMEOUT_MSEC
+      true
+
+    genToken:->
+      ''+(+new Date())+Utl.genPassword(128)
